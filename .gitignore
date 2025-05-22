@@ -1,0 +1,4 @@
+aws_config/*
+terraform/terraform.tfvars
+terraform/.terraform
+terraform/terraform.tfstate*
