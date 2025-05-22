@@ -10,8 +10,3 @@ aws sts get-caller-identity
 
 (cd terraform && terraform init)
 (cd terraform && terraform plan && terraform apply -auto-approve)
-(aws eks --region ap-southeast-1 update-kubeconfig --name khanh-eks &&
-    kubectl apply -f k8s-manifests/deployment.yaml &&
-    kubectl apply -f k8s-manifests/service.yaml &&
-    kubectl apply -f k8s-manifests/hpa.yaml &&
-    kubectl apply -f k8s-manifests/network-policy.yaml)

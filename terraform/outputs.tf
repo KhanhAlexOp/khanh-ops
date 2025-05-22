@@ -1,7 +1,7 @@
-output "cluster_endpoint" {
-  value = aws_eks_cluster.eks.endpoint
+output "rds_endpoint" {
+  value = aws_db_instance.postgres.endpoint
 }
 
-output "kubeconfig_certificate_authority_data" {
-  value = aws_eks_cluster.eks.certificate_authority[0].data
+output "rds_secret_arn" {
+  value = aws_secretsmanager_secret.db.arn
 }

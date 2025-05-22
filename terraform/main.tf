@@ -1,141 +1,85 @@
-# Get available AZs
 data "aws_availability_zones" "available" {}
 
-# Minimal VPC
-resource "aws_vpc" "eks" {
-  cidr_block           = "10.0.0.0/16"
+resource "aws_vpc" "main" {
+  cidr_block           = "10.2.0.0/16"
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags = { Name = "eks-vpc" }
+  tags = { Name = "rds-vpc" }
 }
 
-# Two public subnets (for free-tier)
-resource "aws_subnet" "eks" {
+resource "aws_subnet" "main" {
   count                   = 2
-  vpc_id                  = aws_vpc.eks.id
-  cidr_block              = cidrsubnet(aws_vpc.eks.cidr_block, 8, count.index)
+  vpc_id                  = aws_vpc.main.id
+  cidr_block              = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
   availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
-  tags = { Name = "eks-subnet-${count.index}" }
+  tags = { Name = "rds-subnet-${count.index}" }
 }
 
-# Internet Gateway
-resource "aws_internet_gateway" "eks" {
-  vpc_id = aws_vpc.eks.id
-  tags = { Name = "eks-igw" }
+resource "aws_internet_gateway" "main" {
+  vpc_id = aws_vpc.main.id
+  tags = { Name = "rds-igw" }
 }
 
-# Route Table
-resource "aws_route_table" "eks" {
-  vpc_id = aws_vpc.eks.id
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.eks.id
+resource "aws_db_subnet_group" "main" {
+  name       = "rds-subnet-group"
+  subnet_ids = aws_subnet.main[*].id
+}
+
+resource "aws_security_group" "rds" {
+  name        = "rds-sg"
+  description = "Allow PostgreSQL"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
-  tags = { Name = "eks-rt" }
-}
 
-# Associate subnets with route table
-resource "aws_route_table_association" "eks" {
-  count          = 2
-  subnet_id      = aws_subnet.eks[count.index].id
-  route_table_id = aws_route_table.eks.id
-}
-
-# EKS Cluster Role
-resource "aws_iam_role" "eks_cluster_role" {
-  name = "eksClusterRole"
-  assume_role_policy = data.aws_iam_policy_document.eks_assume_role_policy.json
-}
-
-data "aws_iam_policy_document" "eks_assume_role_policy" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["eks.amazonaws.com"]
-    }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-resource "aws_iam_role_policy_attachment" "eks_cluster_AmazonEKSClusterPolicy" {
-  role       = aws_iam_role.eks_cluster_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+resource "random_password" "db" {
+  length  = 16
+  special = true
+  override_special = "!#$%&()*+,-.:;<=>?[]^_{|}~"
 }
 
-# Node Role
-resource "aws_iam_role" "eks_node_role" {
-  name = "eksNodeRole"
-  assume_role_policy = data.aws_iam_policy_document.eks_node_assume_role_policy.json
+resource "aws_secretsmanager_secret" "db" {
+  name = "rds-postgres-credentials"
 }
 
-data "aws_iam_policy_document" "eks_node_assume_role_policy" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
-    }
-  }
+resource "aws_secretsmanager_secret_version" "db" {
+  secret_id     = aws_secretsmanager_secret.db.id
+  secret_string = jsonencode({
+    username = "postgresadmin"
+    password = random_password.db.result
+  })
 }
 
-resource "aws_iam_role_policy_attachment" "eks_node_AmazonEKSWorkerNodePolicy" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
+resource "aws_db_instance" "postgres" {
+  identifier              = "demo-postgres"
+  allocated_storage       = 20
+  engine                  = "postgres"
+  engine_version          = "15.11"
+  instance_class          = "db.t3.micro"
+  db_name                 = "appdb"
+  username                = jsondecode(aws_secretsmanager_secret_version.db.secret_string)["username"]
+  password                = jsondecode(aws_secretsmanager_secret_version.db.secret_string)["password"]
+  db_subnet_group_name    = aws_db_subnet_group.main.name
+  vpc_security_group_ids  = [aws_security_group.rds.id]
+  skip_final_snapshot     = true
+  publicly_accessible     = true
+  multi_az                = false
+  backup_retention_period = 0
+  deletion_protection     = false
+  apply_immediately       = true
 
-resource "aws_iam_role_policy_attachment" "eks_node_AmazonEC2ContainerRegistryReadOnly" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy_attachment" "eks_node_AmazonEKS_CNI_Policy" {
-  role       = aws_iam_role.eks_node_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}
-
-# KMS Key for secrets encryption
-resource "aws_kms_key" "eks" {
-  description             = "KMS key for EKS secrets encryption"
-  deletion_window_in_days = 10
-  enable_key_rotation     = true
-}
-
-# EKS Cluster
-resource "aws_eks_cluster" "eks" {
-  name     = "khanh-eks"
-  role_arn = aws_iam_role.eks_cluster_role.arn
-
-  vpc_config {
-    subnet_ids = aws_subnet.eks[*].id
-  }
-
-  enabled_cluster_log_types = ["api", "audit"]
-
-  encryption_config {
-    resources = ["secrets"]
-    provider {
-      key_arn = aws_kms_key.eks.arn
-    }
-  }
-}
-
-# EKS Node Group (t3.micro is free-tier eligible)
-resource "aws_eks_node_group" "node_group" {
-  cluster_name    = aws_eks_cluster.eks.name
-  node_group_name = "khanh-eks-node-group"
-  node_role_arn   = aws_iam_role.eks_node_role.arn
-  subnet_ids      = aws_subnet.eks[*].id
-
-  scaling_config {
-    desired_size = 1
-    max_size     = 2
-    min_size     = 1
-  }
-
-  instance_types = ["t3.micro"]
-  ami_type       = "AL2_x86_64" # Amazon Linux 2 (Ubuntu not supported for EKS managed nodes)
-  remote_access {
-    ec2_ssh_key = var.aws_ssh_key
-  }
 }
